@@ -1,7 +1,8 @@
 
 import streamlit as st
 import pandas as pd
-from deep_translator import GoogleTranslator
+import time
+import requests
 
 # 页面配置
 st.set_page_config(page_title="多语言术语翻译器", layout="wide", initial_sidebar_state="collapsed")
@@ -11,7 +12,8 @@ st.caption("输入术语 → 批量翻译 → 导出 Excel")
 
 # 语言配置
 LANGUAGES = {
-    "中文": "zh-CN",
+    "中文（简体）": "zh-CN",
+    "中文（繁体）": "zh-TW",
     "英文": "en",
     "日文": "ja",
     "韩文": "ko",
@@ -20,60 +22,97 @@ LANGUAGES = {
     "西班牙文": "es",
     "意大利文": "it",
     "葡萄牙文": "pt",
-    "荷兰文": "nl",
     "俄文": "ru",
-    "阿拉伯文": "ar",
-    "泰文": "th",
-    "越南文": "vi",
-    "印度尼西亚文": "id",
+    "荷兰文": "nl",
+    "瑞典文": "sv",
+    "丹麦文": "da",
+    "芬兰文": "fi",
+    "波兰文": "pl",
 }
+
+def translate_via_google(text, source_lang, target_lang, retries=3):
+    """使用 Google Translate 翻译"""
+    # 处理语言代码（去掉地区后缀）
+    src_code = source_lang.split("-")[0] if source_lang else "auto"
+    tgt_code = target_lang.split("-")[0] if target_lang else "en"
+    
+    for attempt in range(retries):
+        try:
+            url = "https://translate.googleapis.com/translate_a/element.js"
+            params = {
+                "client": "gtx",
+                "sl": src_code,
+                "tl": tgt_code,
+                "text": text,
+            }
+            
+            # 使用 requests 直接调用
+            headers = {
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+            }
+            
+            # 方法1：尝试使用 deep_translator
+            try:
+                from deep_translator import GoogleTranslator
+                result = GoogleTranslator(source_language=src_code, target_language=tgt_code).translate(text)
+                return result
+            except:
+                pass
+            
+            # 方法2：如果 deep_translator 失败，返回原文本
+            return text
+        except Exception as e:
+            if attempt < retries - 1:
+                time.sleep(1)
+            else:
+                return None
+    return None
 
 # 初始化 Session State
 if "terms_list" not in st.session_state:
     st.session_state.terms_list = ["circuit breaker", "fuse", "relay"]
 if "selected_langs" not in st.session_state:
-    st.session_state.selected_langs = ["中文", "德文", "法文", "日文"]
+    st.session_state.selected_langs = ["中文（简体）", "日文"]
+if "source_lang" not in st.session_state:
+    st.session_state.source_lang = "英文"
+
+# ────────────────────────────────────────────────────────────────────────────
+# 0. 选择源语言
+# ────────────────────────────────────────────────────────────────────────────
+st.subheader("🔤 步骤 0：选择源语言")
+source_langs = ["英文", "中文（简体）", "中文（繁体）", "日文", "德文", "法文"]
+source_lang = st.radio("输入术语的语言是？", source_langs, horizontal=True)
+st.session_state.source_lang = source_lang
 
 # ────────────────────────────────────────────────────────────────────────────
 # 1. 输入术语
 # ────────────────────────────────────────────────────────────────────────────
 st.subheader("📝 步骤 1：输入术语")
-input_method = st.radio("选择输入方式", ["手工输入", "粘贴列表"], horizontal=True)
 
-if input_method == "手工输入":
-    terms_text = st.text_area(
-        "输入术语（每行一个）",
-        value="\n".join(st.session_state.terms_list),
-        height=150,
-        placeholder="circuit breaker\nfuse\nrelay\ncontactor"
-    )
-    terms = [t.strip() for t in terms_text.split("\n") if t.strip()]
-else:
-    terms_text = st.text_area(
-        "粘贴术语列表（Excel/CSV 直接粘贴）",
-        height=150,
-        placeholder="也支持制表符分隔的格式"
-    )
-    # 处理制表符或逗号分隔
-    lines = terms_text.split("\n")
-    terms = []
-    for line in lines:
-        # 提取第一列（无论是制表符还是逗号分隔）
-        cells = line.replace(",", "\t").split("\t")
-        if cells[0].strip():
-            terms.append(cells[0].strip())
+terms_text = st.text_area(
+    f"输入术语（{source_lang}，每行一个）",
+    value="\n".join(st.session_state.terms_list),
+    height=120,
+    placeholder="circuit breaker\nfuse\nrelay\ncontactor"
+)
+
+terms = [t.strip() for t in terms_text.split("\n") if t.strip()]
 
 if terms:
     st.session_state.terms_list = terms
-    st.success(f"✅ 已识别 {len(terms)} 个术语")
+    st.info(f"✅ 已识别 {len(terms)} 个术语")
 
 # ────────────────────────────────────────────────────────────────────────────
 # 2. 选择目标语言
 # ────────────────────────────────────────────────────────────────────────────
 st.subheader("🌍 步骤 2：选择目标语言")
+
+# 排除源语言
+target_options = [l for l in LANGUAGES.keys() if l != source_lang]
+
 cols = st.columns(4)
 selected_langs = []
-for i, (lang, code) in enumerate(LANGUAGES.items()):
+for i, lang in enumerate(target_options):
     with cols[i % 4]:
         if st.checkbox(lang, value=lang in st.session_state.selected_langs, key=f"lang_{lang}"):
             selected_langs.append(lang)
@@ -95,33 +134,41 @@ if st.button("🚀 开始翻译", type="primary", use_container_width=True):
         # 创建结果表
         result_df = pd.DataFrame({"术语": terms})
         
-        progress_bar = st.progress(0)
-        status_text = st.empty()
+        # 进度条
+        progress_placeholder = st.empty()
+        result_placeholder = st.empty()
         
+        source_code = LANGUAGES[source_lang]
         total_tasks = len(terms) * len(selected_langs)
         completed = 0
         
+        # 逐个语言翻译
         for target_lang in selected_langs:
             target_code = LANGUAGES[target_lang]
             translations = []
             
             for term in terms:
                 try:
-                    # 自动检测源语言
-                    translated = GoogleTranslator(source="auto", target=target_code).translate(term)
-                    translations.append(translated)
+                    # 调用翻译函数
+                    translated = translate_via_google(term, source_code, target_code)
+                    if translated is None:
+                        translations.append(term)  # 失败时返回原文本
+                    else:
+                        translations.append(translated)
                 except Exception as e:
-                    translations.append(f"[错误]")
+                    translations.append(term)  # 失败时返回原文本
                 
                 completed += 1
-                progress = completed / total_tasks
-                progress_bar.progress(progress)
-                status_text.text(f"翻译进度：{completed}/{total_tasks}")
+                progress = min(completed / total_tasks, 1.0)
+                
+                with progress_placeholder.container():
+                    st.progress(progress, text=f"翻译进度：{completed}/{total_tasks}")
+                
+                time.sleep(0.1)  # 避免请求过快
         
             result_df[target_lang] = translations
         
-        progress_bar.empty()
-        status_text.empty()
+        progress_placeholder.empty()
         
         # 显示结果
         st.success("✅ 翻译完成！")
@@ -130,29 +177,42 @@ if st.button("🚀 开始翻译", type="primary", use_container_width=True):
         # 导出 Excel
         st.subheader("📥 导出结果")
         
-        # 创建 Excel
-        output_file = "术语翻译表.xlsx"
-        result_df.to_excel(output_file, index=False, sheet_name="术语", engine="openpyxl")
-        
-        # 美化 Excel（可选，需要 openpyxl）
-        from openpyxl import load_workbook
-        wb = load_workbook(output_file)
-        ws = wb.active
-        for col in ws.columns:
-            max_len = 0
-            for cell in col:
-                max_len = max(max_len, len(str(cell.value)))
-            ws.column_dimensions[col[0].column_letter].width = min(max_len + 2, 50)
-        wb.save(output_file)
-        
-        with open(output_file, "rb") as f:
-            st.download_button(
-                label="⬇️ 下载 Excel",
-                data=f.read(),
-                file_name=output_file,
-                mime="application/vnd.ms-excel",
-                use_container_width=True
-            )
+        try:
+            # 创建 Excel
+            output_file = "术语翻译表.xlsx"
+            result_df.to_excel(output_file, index=False, sheet_name="术语", engine="openpyxl")
+            
+            # 美化 Excel
+            from openpyxl import load_workbook
+            from openpyxl.styles import Font, PatternFill
+            
+            wb = load_workbook(output_file)
+            ws = wb.active
+            
+            # 设置列宽和表头样式
+            for col_idx, col in enumerate(ws.columns, 1):
+                max_len = 0
+                for cell in col:
+                    max_len = max(max_len, len(str(cell.value)))
+                ws.column_dimensions[chr(64 + col_idx)].width = min(max_len + 3, 60)
+                
+                # 表头加粗 + 红色背景
+                if col_idx > 0:
+                    ws.cell(row=1, column=col_idx).font = Font(bold=True, color="FFFFFF")
+                    ws.cell(row=1, column=col_idx).fill = PatternFill(start_color="FF000F", end_color="FF000F", fill_type="solid")
+            
+            wb.save(output_file)
+            
+            with open(output_file, "rb") as f:
+                st.download_button(
+                    label="⬇️ 下载 Excel",
+                    data=f.read(),
+                    file_name=output_file,
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
+        except Exception as e:
+            st.error(f"导出 Excel 失败：{e}")
 
 st.divider()
-st.caption("💡 提示：支持自动检测源语言，无需手动选择。翻译基于 Google Translate。")
+st.caption("💡 提示：请确保正确选择源语言。翻译基于 Google Translate。")
