@@ -3,6 +3,7 @@ import streamlit as st
 import pandas as pd
 import time
 import requests
+from urllib.parse import quote
 
 # 页面配置
 st.set_page_config(page_title="多语言术语翻译器", layout="wide", initial_sidebar_state="collapsed")
@@ -10,7 +11,7 @@ st.set_page_config(page_title="多语言术语翻译器", layout="wide", initial
 st.title("🌐 多语言术语翻译器")
 st.caption("输入术语 → 批量翻译 → 导出 Excel")
 
-# 语言配置
+# 语言配置和代码映射
 LANGUAGES = {
     "中文（简体）": "zh-CN",
     "中文（繁体）": "zh-TW",
@@ -24,49 +25,48 @@ LANGUAGES = {
     "葡萄牙文": "pt",
     "俄文": "ru",
     "荷兰文": "nl",
-    "瑞典文": "sv",
-    "丹麦文": "da",
-    "芬兰文": "fi",
-    "波兰文": "pl",
 }
 
-def translate_via_google(text, source_lang, target_lang, retries=3):
-    """使用 Google Translate 翻译"""
-    # 处理语言代码（去掉地区后缀）
-    src_code = source_lang.split("-")[0] if source_lang else "auto"
-    tgt_code = target_lang.split("-")[0] if target_lang else "en"
-    
-    for attempt in range(retries):
-        try:
-            url = "https://translate.googleapis.com/translate_a/element.js"
-            params = {
-                "client": "gtx",
-                "sl": src_code,
-                "tl": tgt_code,
-                "text": text,
-            }
-            
-            # 使用 requests 直接调用
-            headers = {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-            }
-            
-            # 方法1：尝试使用 deep_translator
-            try:
-                from deep_translator import GoogleTranslator
-                result = GoogleTranslator(source_language=src_code, target_language=tgt_code).translate(text)
-                return result
-            except:
-                pass
-            
-            # 方法2：如果 deep_translator 失败，返回原文本
-            return text
-        except Exception as e:
-            if attempt < retries - 1:
-                time.sleep(1)
-            else:
-                return None
-    return None
+# API 语言代码映射
+GOOGLE_LANG_MAP = {
+    "中文（简体）": "zh-CN",
+    "中文（繁体）": "zh-TW",
+    "英文": "en",
+    "日文": "ja",
+    "韩文": "ko",
+    "德文": "de",
+    "法文": "fr",
+    "西班牙文": "es",
+    "意大利文": "it",
+    "葡萄牙文": "pt",
+    "俄文": "ru",
+    "荷兰文": "nl",
+}
+
+def translate_google_api(text, source_lang, target_lang):
+    """使用 Google Translate API（免费）翻译"""
+    try:
+        # 使用 Google Translate 的免费 API 端点
+        url = f"https://translate.googleapis.com/translate_a/single?client=gtx&sl={source_lang}&tl={target_lang}&dt=t&q={quote(text)}"
+        
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+        
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        
+        # 解析响应
+        result = response.json()
+        if result and result[0]:
+            translations = [item[0] for item in result[0] if item[0]]
+            if translations:
+                return "".join(translations)
+        
+        return text
+    except Exception as e:
+        st.warning(f"翻译出错（{target_lang}）：{str(e)}")
+        return text
 
 # 初始化 Session State
 if "terms_list" not in st.session_state:
@@ -80,8 +80,13 @@ if "source_lang" not in st.session_state:
 # 0. 选择源语言
 # ────────────────────────────────────────────────────────────────────────────
 st.subheader("🔤 步骤 0：选择源语言")
-source_langs = ["英文", "中文（简体）", "中文（繁体）", "日文", "德文", "法文"]
-source_lang = st.radio("输入术语的语言是？", source_langs, horizontal=True)
+st.write("⚠️ **重要**：请根据你输入术语的语言选择。如果输入的是英文术语，请选择**英文**；如果是中文术语，请选择**中文**。")
+
+source_lang = st.radio(
+    "输入术语的语言是？",
+    ["英文", "中文（简体）", "中文（繁体）", "日文", "德文", "法文"],
+    horizontal=True
+)
 st.session_state.source_lang = source_lang
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -107,7 +112,6 @@ if terms:
 # ────────────────────────────────────────────────────────────────────────────
 st.subheader("🌍 步骤 2：选择目标语言")
 
-# 排除源语言
 target_options = [l for l in LANGUAGES.keys() if l != source_lang]
 
 cols = st.columns(4)
@@ -134,41 +138,37 @@ if st.button("🚀 开始翻译", type="primary", use_container_width=True):
         # 创建结果表
         result_df = pd.DataFrame({"术语": terms})
         
-        # 进度条
-        progress_placeholder = st.empty()
-        result_placeholder = st.empty()
+        # 显示进度
+        progress_container = st.container()
         
-        source_code = LANGUAGES[source_lang]
+        source_code = GOOGLE_LANG_MAP[source_lang]
         total_tasks = len(terms) * len(selected_langs)
         completed = 0
         
         # 逐个语言翻译
         for target_lang in selected_langs:
-            target_code = LANGUAGES[target_lang]
+            target_code = GOOGLE_LANG_MAP[target_lang]
             translations = []
             
             for term in terms:
                 try:
-                    # 调用翻译函数
-                    translated = translate_via_google(term, source_code, target_code)
-                    if translated is None:
-                        translations.append(term)  # 失败时返回原文本
-                    else:
-                        translations.append(translated)
+                    # 调用翻译 API
+                    translated = translate_google_api(term, source_code, target_code)
+                    translations.append(translated)
                 except Exception as e:
-                    translations.append(term)  # 失败时返回原文本
+                    translations.append(term)
                 
                 completed += 1
                 progress = min(completed / total_tasks, 1.0)
                 
-                with progress_placeholder.container():
+                with progress_container:
                     st.progress(progress, text=f"翻译进度：{completed}/{total_tasks}")
                 
-                time.sleep(0.1)  # 避免请求过快
+                time.sleep(0.2)  # 避免请求过快
         
             result_df[target_lang] = translations
         
-        progress_placeholder.empty()
+        progress_container.empty()
         
         # 显示结果
         st.success("✅ 翻译完成！")
@@ -215,4 +215,4 @@ if st.button("🚀 开始翻译", type="primary", use_container_width=True):
             st.error(f"导出 Excel 失败：{e}")
 
 st.divider()
-st.caption("💡 提示：请确保正确选择源语言。翻译基于 Google Translate。")
+st.caption("💡 提示：翻译基于 Google Translate 免费 API。网络连接稳定最佳。")
